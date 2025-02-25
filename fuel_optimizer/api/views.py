@@ -1,6 +1,12 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status, generics
+from .models import FuelPrice
+from .serializers import FuelPriceSerializer
+
+class FuelPriceListView(generics.ListAPIView):
+    queryset = FuelPrice.objects.all()
+    serializer_class = FuelPriceSerializer
 
 class RouteFuelView(APIView):
     def post(self, request, *args, **kwargs):
