@@ -1,3 +1,5 @@
+import os
+import requests
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, generics
@@ -16,13 +18,14 @@ class RouteFuelView(APIView):
         if not start or not finish:
             return Response({'error': 'Both start and finish locations are required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Step 1: Call the mapping API to get route details.
+        # 1. Get route details using our mapping API integration
         route_data = self.get_route(start, finish)
         if not route_data:
             return Response({'error': 'Error retrieving route data.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # Step 2: Process route_data to determine fuel stops and cost.
+        # 2. Determine optimal fuel stops (dummy implementation for now)
         fuel_stops = self.calculate_fuel_stops(route_data)
+        # 3. Calculate the total cost of fuel for the trip
         total_cost = self.calculate_total_cost(route_data, fuel_stops)
 
         response_data = {
@@ -32,20 +35,67 @@ class RouteFuelView(APIView):
         }
         return Response(response_data)
 
+    def geocode(self, address):
+        """Use Nominatim to convert an address into coordinates."""
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {'q': address, 'format': 'json'}
+        headers = {'User-Agent': 'fuel_optimizer/1.0 mohamed20163858@gmail.com'}  # Replace with your info
+        response = requests.get(url, params=params, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            if data:
+                # Return (latitude, longitude)
+                return float(data[0]['lat']), float(data[0]['lon'])
+        return None
+
     def get_route(self, start, finish):
-        # Placeholder: integrate your free mapping API here.
-        # Ideally, make one API call to retrieve route data.
-        # For now, return a dummy structure.
-        return {
-            'start': start,
-            'finish': finish,
-            'distance_miles': 380,
-            'map_url': 'https://maps.example.com/route?data=xyz'
+        """Get the route details from the openrouteservice API."""
+        start_coords = self.geocode(start)
+        finish_coords = self.geocode(finish)
+        print("Start Coords:", start_coords, "Finish Coords:", finish_coords)
+        if not start_coords or not finish_coords:
+            return None
+
+        ors_api_key = os.getenv("OPENROUTESERVICE_API_KEY")
+        if not ors_api_key:
+            return None
+
+        url = "https://api.openrouteservice.org/v2/directions/driving-car"
+        headers = {
+            'Authorization': ors_api_key,
+            'Content-Type': 'application/json'
         }
+        # openrouteservice expects coordinates in [longitude, latitude] order.
+        body = {
+            "coordinates": [
+                [start_coords[1], start_coords[0]],
+                [finish_coords[1], finish_coords[0]]
+            ]
+        }
+        response = requests.post(url, headers=headers, json=body)
+        print("Openrouteservice API Status:", response.status_code)
+        print("Openrouteservice API Response:", response.text)
+        if response.status_code == 200:
+            data = response.json()
+            routes = data.get('routes', [])
+            if routes:
+                route_summary = routes[0].get('summary', {})
+                # Extract geometry if available (it might be an encoded polyline or GeoJSON if requested)
+                geometry = routes[0].get('geometry', {})
+                return {
+                    'start': start,
+                    'finish': finish,
+                    'distance_meters': route_summary.get('distance', 0),
+                    'duration_seconds': route_summary.get('duration', 0),
+                    'geometry': geometry,
+                    'map_url': f"https://maps.openrouteservice.org/directions?n1={start_coords[0]}&n2={start_coords[1]}&n3=14&route={finish}"
+                }
+        return None
 
     def calculate_fuel_stops(self, route_data):
-        # Placeholder: implement logic to determine stops based on fuel prices file.
-        # Here, we assume one recommended stop.
+        """Dummy implementation: returns an example fuel stop."""
+        # In a full implementation, i'd break the route into segments of up to 500 miles,
+        # then query the FuelPrice model to find cost-effective stops along the route.
         return [{
             "location": "Bakersfield, CA",
             "miles_from_start": 190,
@@ -54,12 +104,9 @@ class RouteFuelView(APIView):
         }]
 
     def calculate_total_cost(self, route_data, fuel_stops):
-        # Calculate fuel needed (assume 10 mpg)
-        total_distance = route_data.get('distance_miles', 0)
-        total_gallons = total_distance / 10
-        # For simplicity, we take the price from the first fuel stop if available.
-        if fuel_stops:
-            price = fuel_stops[0].get('fuel_price', 3.50)
-        else:
-            price = 3.50
+        """Calculate the total fuel cost based on the route distance."""
+        total_distance_miles = route_data.get('distance_meters', 0) / 1609.34  # convert meters to miles
+        total_gallons = total_distance_miles / 10  # vehicle achieves 10 miles per gallon
+        # For simplicity, use the fuel price from the first fuel stop if available.
+        price = fuel_stops[0].get('fuel_price', 3.50) if fuel_stops else 3.50
         return round(total_gallons * price, 2)
