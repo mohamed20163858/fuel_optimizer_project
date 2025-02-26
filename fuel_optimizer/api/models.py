@@ -9,6 +9,9 @@ class FuelPrice(models.Model):
     state = models.CharField(max_length=2)
     rack_id = models.IntegerField()
     retail_price = models.FloatField()
+    lat = models.FloatField(null=True, blank=True)
+    lon = models.FloatField(null=True, blank=True)
+
 
     def __str__(self):
         return f"{self.truckstop_name} ({self.city}, {self.state}) - ${self.retail_price}"

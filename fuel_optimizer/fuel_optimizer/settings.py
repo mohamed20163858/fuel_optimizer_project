@@ -32,6 +32,7 @@ SECRET_KEY = 'django-insecure-f=^x)pd)emw4*7pk)iv^(1a-f5k1y!0((o=c$k0hs(f=(wj69f
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env('DEBUG')
 OPENROUTESERVICE_API_KEY = env('OPENROUTESERVICE_API_KEY')
+MAPQUEST_API_KEY = env('MAPQUEST_API_KEY')
 
 ALLOWED_HOSTS = []
 
