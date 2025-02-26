@@ -1,9 +1,12 @@
 import os
 import math
+import polyline
 import requests
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, generics
+from shapely.geometry import LineString
+from geopy.distance import distance as geopy_distance
 from .models import FuelPrice
 from .serializers import FuelPriceSerializer
 
@@ -53,7 +56,7 @@ class RouteFuelView(APIView):
         """Get the route details from the openrouteservice API."""
         start_coords = self.geocode(start)
         finish_coords = self.geocode(finish)
-        print("Start Coords:", start_coords, "Finish Coords:", finish_coords)
+        # print("Start Coords:", start_coords, "Finish Coords:", finish_coords)
         if not start_coords or not finish_coords:
             return None
 
@@ -74,8 +77,8 @@ class RouteFuelView(APIView):
             ]
         }
         response = requests.post(url, headers=headers, json=body)
-        print("Openrouteservice API Status:", response.status_code)
-        print("Openrouteservice API Response:", response.text)
+        # print("Openrouteservice API Status:", response.status_code)
+        # print("Openrouteservice API Response:", response.text)
         if response.status_code == 200:
             data = response.json()
             routes = data.get('routes', [])
@@ -95,39 +98,69 @@ class RouteFuelView(APIView):
 
     def calculate_fuel_stops(self, route_data):
         """
-        Determine the required fuel stops along the route based on vehicle range (500 miles).
-        For simplicity, if the route exceeds 500 miles, we calculate how many stops are needed
-        and recommend the cheapest fuel station from the database for each stop.
+        Determine optimal fuel stops along the route based on vehicle range (500 miles).
+        This implementation decodes the route's encoded polyline, creates a LineString,
+        and for each required 500-mile segment finds fuel stations near the target point (within ~10 miles).
+        It then selects the station with the lowest fuel price from among those candidates.
+        Assumes FuelPrice model includes 'lat' and 'lon' fields.
         """
         total_distance_meters = route_data.get('distance_meters', 0)
         total_distance_miles = total_distance_meters / 1609.34
-        # If the total distance is within a single tank (500 miles), no stops are required.
+        # If the total route is within one tank (500 miles), no stops are needed.
         if total_distance_miles <= 500:
             return []
         
-        # Number of stops needed: for example, a 1000-mile trip requires 1 stop,
-        # a 1500-mile trip requires 2 stops, etc.
+        # Determine how many stops are needed.
         num_stops = math.ceil(total_distance_miles / 500) - 1
-        
-        # Query the database for the cheapest fuel station.
-        cheapest_station = FuelPrice.objects.order_by('retail_price').first()
-        if not cheapest_station:
-            # If no fuel station is found, return an empty list.
+
+        # Decode the route geometry (assuming it's an encoded polyline string).
+        encoded_geometry = route_data.get('geometry', '')
+        route_coords = polyline.decode(encoded_geometry)
+        if not route_coords:
             return []
         
-        # For each stop, assume a full tank (500 miles worth of fuel at 10 mpg, i.e., 500/10 gallons)
-        recommended_gallons = 500 / 10
+        # Create a LineString (note: Shapely expects coordinates in (lon, lat) order).
+        route_line = LineString([(lon, lat) for lat, lon in route_coords])
         
-        # We'll also assume that each stop is optimally placed every 500 miles.
-        # In a real implementation, you'd adjust the miles_from_start based on the actual route geometry.
         stops = []
-        for i in range(num_stops):
-            stop_miles = (i + 1) * 500  # e.g., first stop at 500 miles, second at 1000 miles, etc.
+        # For each required stop, find the ideal point along the route.
+        for i in range(1, num_stops + 1):
+            # Target distance along the route in meters (500 miles * i converted to meters).
+            target_distance_m = 500 * i * 1609.34
+            # Ensure we do not exceed the route's length.
+            if target_distance_m > route_line.length:
+                target_distance_m = route_line.length
+            target_point = route_line.interpolate(target_distance_m)
+            target_lat = target_point.y
+            target_lon = target_point.x
+            
+            # Define a search radius (10 miles ≈ 16,093.4 meters).
+            search_radius_m = 16093.4
+            
+            candidate_stations = []
+            for station in FuelPrice.objects.all():
+                # Ensure the station has latitude and longitude.
+                if station.lat is None or station.lon is None:
+                    continue
+                station_coords = (station.lat, station.lon)
+                target_coords = (target_lat, target_lon)
+                dist = geopy_distance(target_coords, station_coords).meters
+                if dist <= search_radius_m:
+                    candidate_stations.append((station, dist))
+            
+            # Select the station with the lowest retail price from the candidates.
+            if candidate_stations:
+                candidate_stations.sort(key=lambda x: x[0].retail_price)
+                selected_station = candidate_stations[0][0]
+            else:
+                # If no station is nearby, fallback to the overall cheapest station.
+                selected_station = FuelPrice.objects.order_by('retail_price').first()
+            
             stops.append({
-                "location": f"{cheapest_station.truckstop_name}, {cheapest_station.city}, {cheapest_station.state}",
-                "miles_from_start": stop_miles,
-                "fuel_price": cheapest_station.retail_price,
-                "recommended_gallons": recommended_gallons
+                "location": f"{selected_station.truckstop_name}, {selected_station.city}, {selected_station.state}",
+                "miles_from_start": 500 * i,
+                "fuel_price": selected_station.retail_price,
+                "recommended_gallons": 500 / 10  # since vehicle achieves 10 mpg
             })
         
         return stops
