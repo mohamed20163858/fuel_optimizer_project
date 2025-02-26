@@ -1,4 +1,5 @@
 import os
+import math
 import requests
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -93,15 +94,43 @@ class RouteFuelView(APIView):
         return None
 
     def calculate_fuel_stops(self, route_data):
-        """Dummy implementation: returns an example fuel stop."""
-        # In a full implementation, i'd break the route into segments of up to 500 miles,
-        # then query the FuelPrice model to find cost-effective stops along the route.
-        return [{
-            "location": "Bakersfield, CA",
-            "miles_from_start": 190,
-            "fuel_price": 3.50,
-            "recommended_gallons": 19
-        }]
+        """
+        Determine the required fuel stops along the route based on vehicle range (500 miles).
+        For simplicity, if the route exceeds 500 miles, we calculate how many stops are needed
+        and recommend the cheapest fuel station from the database for each stop.
+        """
+        total_distance_meters = route_data.get('distance_meters', 0)
+        total_distance_miles = total_distance_meters / 1609.34
+        # If the total distance is within a single tank (500 miles), no stops are required.
+        if total_distance_miles <= 500:
+            return []
+        
+        # Number of stops needed: for example, a 1000-mile trip requires 1 stop,
+        # a 1500-mile trip requires 2 stops, etc.
+        num_stops = math.ceil(total_distance_miles / 500) - 1
+        
+        # Query the database for the cheapest fuel station.
+        cheapest_station = FuelPrice.objects.order_by('retail_price').first()
+        if not cheapest_station:
+            # If no fuel station is found, return an empty list.
+            return []
+        
+        # For each stop, assume a full tank (500 miles worth of fuel at 10 mpg, i.e., 500/10 gallons)
+        recommended_gallons = 500 / 10
+        
+        # We'll also assume that each stop is optimally placed every 500 miles.
+        # In a real implementation, you'd adjust the miles_from_start based on the actual route geometry.
+        stops = []
+        for i in range(num_stops):
+            stop_miles = (i + 1) * 500  # e.g., first stop at 500 miles, second at 1000 miles, etc.
+            stops.append({
+                "location": f"{cheapest_station.truckstop_name}, {cheapest_station.city}, {cheapest_station.state}",
+                "miles_from_start": stop_miles,
+                "fuel_price": cheapest_station.retail_price,
+                "recommended_gallons": recommended_gallons
+            })
+        
+        return stops
 
     def calculate_total_cost(self, route_data, fuel_stops):
         """Calculate the total fuel cost based on the route distance."""
