@@ -86,11 +86,25 @@ class RouteFuelView(APIView):
                 route_summary = routes[0].get('summary', {})
                 # Extract geometry if available (it might be an encoded polyline or GeoJSON if requested)
                 geometry = routes[0].get('geometry', {})
+                # Get raw duration in seconds.
+                duration_seconds = route_summary.get('duration', 0)
+                # Convert duration to hours and minutes.
+                hours = int(duration_seconds // 3600)
+                minutes = int((duration_seconds % 3600) // 60)
+                duration_formatted = f"{hours} h {minutes} min"
+                
+                # Get raw distance in meters.
+                distance_meters = route_summary.get('distance', 0)
+                distance_km = distance_meters / 1000.0
+                distance_miles = distance_meters / 1609.34
                 return {
                     'start': start,
                     'finish': finish,
-                    'distance_meters': route_summary.get('distance', 0),
-                    'duration_seconds': route_summary.get('duration', 0),
+                    'distance_meters': distance_meters,
+                    'distance_km': round(distance_km, 2),
+                    'distance_miles': round(distance_miles, 2),
+                    'duration_seconds': duration_seconds,
+                    'duration_formatted': duration_formatted,
                     'geometry': geometry,
                     'map_url': f"https://maps.openrouteservice.org/directions?n1={start_coords[0]}&n2={start_coords[1]}&n3=14&route={finish}"
                 }
@@ -98,72 +112,96 @@ class RouteFuelView(APIView):
 
     def calculate_fuel_stops(self, route_data):
         """
-        Determine optimal fuel stops along the route based on vehicle range (500 miles).
-        This implementation decodes the route's encoded polyline, creates a LineString,
-        and for each required 500-mile segment finds fuel stations near the target point (within ~10 miles).
-        It then selects the station with the lowest fuel price from among those candidates.
-        Assumes FuelPrice model includes 'lat' and 'lon' fields.
+        Determine optimal fuel stops along the route based on a 500-mile range.
+        This implementation decodes the encoded polyline from openrouteservice,
+        computes cumulative geodesic distances along the route (in meters), and for each required 
+        500-mile segment, interpolates the target coordinate along the route.
+        It then finds fuel stations near that target point (within ~10 miles, i.e., 16,093.4 m)
+        and selects the station with the lowest fuel price.
+        Assumes the FuelPrice model includes 'lat' and 'lon' fields.
         """
         total_distance_meters = route_data.get('distance_meters', 0)
         total_distance_miles = total_distance_meters / 1609.34
-        # If the total route is within one tank (500 miles), no stops are needed.
+        # If the route is within one tank (500 miles), no stops are needed.
         if total_distance_miles <= 500:
             return []
         
-        # Determine how many stops are needed.
+        # Determine number of stops needed.
         num_stops = math.ceil(total_distance_miles / 500) - 1
 
-        # Decode the route geometry (assuming it's an encoded polyline string).
+        # Decode the route geometry (assumed to be an encoded polyline string).
         encoded_geometry = route_data.get('geometry', '')
-        route_coords = polyline.decode(encoded_geometry)
+        route_coords = polyline.decode(encoded_geometry)  # returns list of (lat, lon)
         if not route_coords:
             return []
         
-        # Create a LineString (note: Shapely expects coordinates in (lon, lat) order).
-        route_line = LineString([(lon, lat) for lat, lon in route_coords])
+        # Compute cumulative geodesic distances along the polyline.
+        # We'll use geopy.distance (which returns meters) between successive points.
+        cumulative_distances = [0]  # first point is at distance 0
+        for i in range(1, len(route_coords)):
+            prev_point = route_coords[i - 1]  # (lat, lon)
+            curr_point = route_coords[i]
+            d = geopy_distance(prev_point, curr_point).meters
+            cumulative_distances.append(cumulative_distances[-1] + d)
         
+        polyline_total_distance = cumulative_distances[-1]
+        # (Note: polyline_total_distance may not exactly equal route_data['distance_meters']
+        # because of simplification differences, but it will be used for interpolation.)
+
         stops = []
-        # For each required stop, find the ideal point along the route.
         for i in range(1, num_stops + 1):
-            # Target distance along the route in meters (500 miles * i converted to meters).
+            # Target distance along the route in meters for the i-th stop.
             target_distance_m = 500 * i * 1609.34
-            # Ensure we do not exceed the route's length.
-            if target_distance_m > route_line.length:
-                target_distance_m = route_line.length
-            target_point = route_line.interpolate(target_distance_m)
-            target_lat = target_point.y
-            target_lon = target_point.x
+            if target_distance_m > polyline_total_distance:
+                target_point = route_coords[-1]
+            else:
+                # Find the segment where the cumulative distance exceeds the target.
+                for j in range(1, len(cumulative_distances)):
+                    if cumulative_distances[j] >= target_distance_m:
+                        # Interpolate between route_coords[j-1] and route_coords[j]
+                        prev_point = route_coords[j - 1]  # (lat, lon)
+                        curr_point = route_coords[j]
+                        segment_dist = cumulative_distances[j] - cumulative_distances[j - 1]
+                        if segment_dist == 0:
+                            frac = 0
+                        else:
+                            frac = (target_distance_m - cumulative_distances[j - 1]) / segment_dist
+                        target_lat = prev_point[0] + frac * (curr_point[0] - prev_point[0])
+                        target_lon = prev_point[1] + frac * (curr_point[1] - prev_point[1])
+                        target_point = (target_lat, target_lon)
+                        break
             
-            # Define a search radius (10 miles ≈ 16,093.4 meters).
+            # Define search radius: 10 miles ≈ 16,093.4 meters.
             search_radius_m = 16093.4
-            
             candidate_stations = []
+            # Loop over all fuel stations.
             for station in FuelPrice.objects.all():
-                # Ensure the station has latitude and longitude.
                 if station.lat is None or station.lon is None:
                     continue
                 station_coords = (station.lat, station.lon)
-                target_coords = (target_lat, target_lon)
-                dist = geopy_distance(target_coords, station_coords).meters
+                # Compute geodesic distance between target point and station.
+                dist = geopy_distance(target_point, station_coords).meters
                 if dist <= search_radius_m:
                     candidate_stations.append((station, dist))
             
-            # Select the station with the lowest retail price from the candidates.
             if candidate_stations:
                 candidate_stations.sort(key=lambda x: x[0].retail_price)
                 selected_station = candidate_stations[0][0]
             else:
-                # If no station is nearby, fallback to the overall cheapest station.
+                # Fallback: if no candidate is found near target, use the overall cheapest station.
                 selected_station = FuelPrice.objects.order_by('retail_price').first()
             
             stops.append({
                 "location": f"{selected_station.truckstop_name}, {selected_station.city}, {selected_station.state}",
+                "lat": selected_station.lat,
+                "lon": selected_station.lon,
                 "miles_from_start": 500 * i,
                 "fuel_price": selected_station.retail_price,
-                "recommended_gallons": 500 / 10  # since vehicle achieves 10 mpg
+                "recommended_gallons": 500 / 10  # 500 miles at 10 mpg
             })
         
         return stops
+
 
     def calculate_total_cost(self, route_data, fuel_stops):
         """Calculate the total fuel cost based on the route distance."""
