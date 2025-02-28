@@ -13,7 +13,7 @@ from ortools.linear_solver import pywraplp
 from .models import FuelPrice
 from .serializers import FuelPriceSerializer
 
-# Transformer for spatial projection: WGS84 to Web Mercator (EPSG:3857)
+# Transformer from WGS84 to Web Mercator (EPSG:3857) for fast metric calculations.
 transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 
 class FuelPriceListView(generics.ListAPIView):
@@ -34,7 +34,7 @@ class RouteFuelView(APIView):
             return Response({'error': 'Error retrieving route data.'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # 2. Get all candidate fuel stations along the route.
+        # 2. Get candidate fuel stations along the route.
         candidate_stops = self.get_candidate_stations(route_data)
         
         # 3. Optimize refueling stops using graph-based optimization.
@@ -43,15 +43,16 @@ class RouteFuelView(APIView):
         if opt_plan is not None:
             fuel_stops = opt_plan
             total_cost = opt_cost
+            # print("total_cost:- ", total_cost)
         else:
             fuel_stops = candidate_stops
             total_cost = self.calculate_total_cost(route_data, candidate_stops)
         
         # 4. Build a Google Maps Directions URL using full addresses.
-        fuel_stop_addresses = [stop['location'] for stop in fuel_stops]
+        fuel_stop_addresses = [stop['google_maps_used_location'] for stop in fuel_stops]
         route_data['map_url'] = self.get_static_map_url(start, finish, fuel_stop_addresses)
         
-        # Remove the geometry field before returning the response.
+        # Remove geometry from the response.
         route_data.pop('geometry', None)
         
         response_data = {
@@ -121,85 +122,81 @@ class RouteFuelView(APIView):
 
     def get_candidate_stations(self, route_data, threshold_m=20*1609.34, mpg=10):
         """
-        For each fuel station in the DB, compute its minimum distance to the route and projected mile marker,
+        For each fuel station in the DB, compute its minimum distance to the route and its projected mile marker,
         using spatial projection for speed.
-        Returns candidate stops with:
+        A station is included as a candidate if its minimum distance is within the threshold.
+        Returns a list of candidate stops, each with:
            - location: "truckstop_name, address, city, state"
            - lat, lon
-           - miles_from_start (miles)
+           - miles_from_start (in miles) along the route
            - fuel_price
            - extra_detour_gallons: (2 * (min_distance in miles)) / mpg
-           - recommended_gallons: 50 + extra_detour_gallons
+           - recommended_gallons: initially set to tank capacity (50 gallons)
         """
         encoded_geometry = route_data.get('geometry', '')
         route_coords = polyline.decode(encoded_geometry)  # List of (lat, lon)
         if not route_coords:
             return []
         
-        # Create a Shapely LineString from route coordinates in EPSG:4326, then project to EPSG:3857.
-        route_line_wgs84 = LineString([(lon, lat) for lat, lon in route_coords])
+        # Build projected route for fast distance calculations.
         projected_points = [Point(*transformer.transform(lon, lat)) for lat, lon in route_coords]
         route_line = LineString(projected_points)
         
-        # Compute cumulative distances along the route (in meters) using projected coordinates.
+        # Compute cumulative distances along route (in meters) using projected points.
         cumulative = [0]
         for i in range(1, len(projected_points)):
             d = projected_points[i-1].distance(projected_points[i])
             cumulative.append(cumulative[-1] + d)
         
         candidate_list = []
-        tank_capacity = 50
-        # Compute bounding box of projected route.
+        tank_capacity = 50  # maximum fuel in gallons
+        # Compute bounding box for projected route.
         xs = [pt.x for pt in projected_points]
         ys = [pt.y for pt in projected_points]
         min_x, max_x = min(xs), max(xs)
         min_y, max_y = min(ys), max(ys)
-        # Expand bounding box by threshold.
         min_x -= threshold_m
         max_x += threshold_m
         min_y -= threshold_m
         max_y += threshold_m
-        # Transform bounding box back to WGS84.
         inv_transformer = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
         box_min_lon, box_min_lat = inv_transformer.transform(min_x, min_y)
         box_max_lon, box_max_lat = inv_transformer.transform(max_x, max_y)
         fuel_stations = FuelPrice.objects.filter(lat__gte=box_min_lat, lat__lte=box_max_lat,
                                                    lon__gte=box_min_lon, lon__lte=box_max_lon)
-        
         for station in fuel_stations:
             if station.lat is None or station.lon is None:
                 continue
-            # Project station point.
             station_point = Point(*transformer.transform(station.lon, station.lat))
             dist_m = route_line.distance(station_point)
             if dist_m <= threshold_m:
-                # Compute projected mile marker using route_line.project()
-                proj_distance = route_line.project(station_point)
+                proj_distance = route_line.project(station_point)  # in meters along route
                 mile_marker = proj_distance / 1609.34
                 extra_gallons = (2 * (dist_m / 1609.34)) / mpg
                 candidate_list.append({
                     "location": f"{station.truckstop_name}, {station.address}, {station.city}, {station.state}",
+                    "google_maps_used_location": f"{station.truckstop_name.split("#")[0]}, {station.city}, {station.state}",  
                     "lat": station.lat,
                     "lon": station.lon,
                     "miles_from_start": round(mile_marker, 2),
                     "fuel_price": station.retail_price,
                     "extra_detour_gallons": round(extra_gallons, 2),
-                    "recommended_gallons": round(tank_capacity + extra_gallons, 2)
+                    "recommended_gallons": tank_capacity  # initial value, will be updated in optimization
                 })
         candidate_list.sort(key=lambda s: s["miles_from_start"])
         return candidate_list
 
-    def calculate_total_cost(self, route_data, fuel_stops):
+    def calculate_total_cost(self, route_data, fuel_stops, mpg=10):
         """Calculate total fuel cost based on overall fuel consumption."""
         total_distance_miles = route_data.get('distance_meters', 0) / 1609.34
-        total_gallons = total_distance_miles / 10
+        total_gallons = total_distance_miles / mpg
         price = fuel_stops[0].get('fuel_price', 3.50) if fuel_stops else 3.50
         return round(total_gallons * price, 2)
 
     def get_static_map_url(self, start_address, finish_address, fuel_stop_addresses):
         """
         Construct a Google Maps Directions URL using addresses.
-        Format:\n
+        Format:
         https://www.google.com/maps/dir/?api=1&origin=<origin>&destination=<destination>&waypoints=<wp1>|<wp2>|...
         """
         base_url = "https://www.google.com/maps/dir/?api=1"
@@ -210,7 +207,7 @@ class RouteFuelView(APIView):
             waypoints = "&waypoints=" + "|".join([quote(addr) for addr in fuel_stop_addresses])
         return f"{base_url}&origin={origin}&destination={destination}{waypoints}"
 
-# --- Graph-based Optimization for Refueling ---
+# --- Graph-based Optimization for Refueling (Adjusted) ---
 def optimize_refueling_graph(total_distance_miles, candidate_stops, tank_capacity=50, mpg=10):
     """
     Use a graph-based approach to select an optimal subset of candidate stops.
@@ -220,39 +217,46 @@ def optimize_refueling_graph(total_distance_miles, candidate_stops, tank_capacit
       - Nodes 1..N: candidate stops (from candidate_stops, sorted by miles_from_start).
       - Node N+1: destination at total_distance_miles.
     
-    An edge from node i to j exists if d[j]-d[i] <= 500 (the truck's range).
-    The cost of an edge to candidate node j is defined as:\n
-         cost = recommended_gallons_j * fuel_price_j\n
+    For an edge from node i to candidate node j (j>=1), the required fuel is:
+         fuel_needed = ((d[j] - d[i]) / mpg) + candidate_stops[j-1]["extra_detour_gallons"]
+    An edge exists if fuel_needed <= tank_capacity.
+    The cost of refueling at candidate stop j is:
+         cost = fuel_needed * candidate_stops[j-1]["fuel_price"]
     (For destination, cost is 0.)
-    Dijkstra's algorithm finds the minimum-cost path.
     
-    Returns (plan, total_cost) where plan is a list of candidate stops on the optimal path.
+    Returns (plan, total_cost) where plan is a list of candidate stops on the optimal path,
+    with an updated "recommended_gallons" field computed based on the actual fuel needed.
     """
+    # Sort candidate stops by mile marker.
     candidate_stops = sorted(candidate_stops, key=lambda s: s["miles_from_start"])
     N = len(candidate_stops)
-    d = [0]  # mile marker at start.
-    costs = [0]  # cost for start is 0.
-    addresses = ["Start"]
-    for stop in candidate_stops:
-        d.append(stop["miles_from_start"])
-        costs.append(stop["recommended_gallons"] * stop["fuel_price"])
-        addresses.append(stop["location"])
-    d.append(total_distance_miles)
-    addresses.append("Destination")
-    costs.append(0)
+    # Create a list of mile markers: index 0 = start, 1..N = candidate stops, N+1 = destination.
+    d = [0] + [stop["miles_from_start"] for stop in candidate_stops] + [total_distance_miles]
     
     num_nodes = N + 2
     edges = {i: [] for i in range(num_nodes)}
+    
+    # Build edges between nodes.
     for i in range(num_nodes):
         for j in range(i+1, num_nodes):
-            if d[j] - d[i] <= 500:
-                edge_cost = 0 if j == num_nodes-1 else costs[j]
-                edges[i].append((j, edge_cost))
+            if j == num_nodes - 1:
+                # Edge from node i to destination: no extra detour cost.
+                fuel_needed = (d[j] - d[i]) / mpg
+                if fuel_needed <= tank_capacity:
+                    edges[i].append((j, 0))
+            else:
+                # Edge from node i to candidate stop j.
+                fuel_needed = (d[j] - d[i]) / mpg + candidate_stops[j-1]["extra_detour_gallons"]
+                if fuel_needed <= tank_capacity:
+                    cost = fuel_needed * candidate_stops[j-1]["fuel_price"]
+                    edges[i].append((j, cost))
     
+    # Use Dijkstra's algorithm to find the minimum cost path.
     dist = [float('inf')] * num_nodes
     prev = [-1] * num_nodes
     dist[0] = 0
     unvisited = set(range(num_nodes))
+    
     while unvisited:
         u = min(unvisited, key=lambda x: dist[x])
         unvisited.remove(u)
@@ -261,6 +265,10 @@ def optimize_refueling_graph(total_distance_miles, candidate_stops, tank_capacit
                 dist[v] = dist[u] + w
                 prev[v] = u
     
+    if dist[num_nodes - 1] == float('inf'):
+        return None, None
+    
+    # Reconstruct the optimal path.
     path = []
     u = num_nodes - 1
     while u != -1:
@@ -268,8 +276,15 @@ def optimize_refueling_graph(total_distance_miles, candidate_stops, tank_capacit
         u = prev[u]
     path.reverse()
     
+    # Build the plan by updating the candidate stops with the computed fuel needed.
     plan = []
-    for node in path[1:-1]:
-        plan.append(candidate_stops[node - 1])
+    for idx in range(1, len(path) - 1):
+        j = path[idx]
+        i = path[idx - 1]
+        fuel_needed = (d[j] - d[i]) / mpg + candidate_stops[j-1]["extra_detour_gallons"]
+        candidate_stop = candidate_stops[j-1].copy()
+        candidate_stop["recommended_gallons"] = round(fuel_needed, 2)
+        plan.append(candidate_stop)
+    
     total_cost = dist[num_nodes - 1]
     return plan, total_cost
