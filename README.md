@@ -2,6 +2,9 @@
 
 This Django application provides an API to calculate the most cost-effective fuel stops along a route between a start and finish location within the USA. The API returns a route map URL along with optimal fuel stop recommendations based on fuel prices, a 10 miles per gallon consumption rate, and a maximum vehicle range of 500 miles.
 
+## Demo Video
+[Demo link](https://www.loom.com/share/d1044c59f4424b6881272a96cdd560fb)
+
 ## Features
 
 - **Route Calculation:** Uses [openrouteservice](https://openrouteservice.org/) for mapping and routing.
@@ -112,8 +115,7 @@ You can use Postman or any other API client to test the endpoints. Here are exam
   "finish": "New York, NY"
 }
 ```
-## Demo Video
-A short Loom video (max 5 minutes) is recommended to demonstrate how the API works using Postman along with an overview of the code. Include the Loom link in your project documentation if sharing with stakeholders.
+
 
 
    
