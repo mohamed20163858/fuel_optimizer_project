@@ -31,35 +31,36 @@ This Django application provides an API to calculate the most cost-effective fue
      python -m venv env
      source env/bin/activate   # On Windows use: env\Scripts\activate
      ```
-4. **Install dependencies:**
+3. **Install dependencies:**
 
     ```bash
     pip install -r requirements.txt
     ```
 
 4. **Configure Environment Variables:**
-  Create a `.env` file and paste the following lines inside it
-  ```bash
-  OPENROUTESERVICE_API_KEY="Enter_your_OPENROUTESERVICE_API_KEY"
-  MAPQUEST_API_KEY="Enter_your_MAPQUEST_API_KEY"
-  DEBUG=True
-  ```
-  You can get the `OPENROUTESERVICE_API_KEY`  by creating an account on the [this link](https://account.heigit.org/login) and then navigating to this [link](https://account.heigit.org/manage/key) to get the key
-  You can get the ` MAPQUEST_API_KEY` by creating an account on the [this link](https://developer.mapquest.com/account/user/login) after that visit this [link](https://developer.mapquest.com/account/user/me/apps) click create new key and get it.
+     Create a `.env` file and paste the following lines inside it
+     ```bash
+     OPENROUTESERVICE_API_KEY="Enter_your_OPENROUTESERVICE_API_KEY"
+     MAPQUEST_API_KEY="Enter_your_MAPQUEST_API_KEY"
+     DEBUG=True
+     ```
+ - You can get the `OPENROUTESERVICE_API_KEY`  by creating an account on the [this link](https://account.heigit.org/login) and then navigating to this [link](https://account.heigit.org/manage/key) to get the key
+ - You can get the ` MAPQUEST_API_KEY` by creating an account on the [this link](https://developer.mapquest.com/account/user/login) after that visit this [link](https://developer.mapquest.com/account/user/me/apps) click create new key and get it.
 5. **Apply Migrations:**
-  ```bash
-  python manage.py migrate
-  ```
+     ```bash
+     python manage.py migrate
+     ```
 6. **Load Fuel Price Data:**
-  run the following commands to load the fuel price data into your app database:-
-  first, run this:- 
-  ```bash
-  python manage.py import_fuel_prices.py
-  ```
-  then run this:- 
-  ```bash
-  python manage.py bulk_update_fuel_stations_geo.py
-  ```
+     run the following commands to load the fuel price data into your app database:-
+     first, run this:- 
+     ```bash
+     python manage.py import_fuel_prices.py
+     ```
+     then run this:-
+   
+     ```bash
+     python manage.py bulk_update_fuel_stations_geo.py
+     ```
   You must run them in order, otherwise, you will get errors inside your terminal
 
 ## Running the Application
@@ -71,15 +72,15 @@ Start the Django development server:
 
 ## API Endpoints
 1. Fuel Price List
-    ```bash
-    Endpoint: /api/fuelprices/
-    Method: GET
-    Description: Returns a list of fuel price records from the database.
-    ```
+   
+ - Endpoint: /api/fuelprices/
+ - Method: GET
+ - Description: Returns a list of fuel price records from the database.
+    
 3. Route Fuel Optimization
-  Endpoint: /api/routefuel/
-  Method: POST
-  Payload:
+  - Endpoint: /api/routefuel/
+  - Method: POST
+  - Payload:
     ```json
     {
       "start": "Los Angeles, CA",
